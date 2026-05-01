@@ -37,7 +37,7 @@ REM Upgrade pip
 python -m pip install --upgrade pip
 
 REM Install required packages
-set "packages=flask flask-cors psutil GPUtil pywin32 pyinstaller setuptools"
+set "packages=psutil pywin32 pyinstaller setuptools"
 
 for %%p in (%packages%) do (
     echo Installing %%p...
@@ -87,22 +87,27 @@ echo Build completed successfully!
 echo.
 
 REM Check build result
-if exist "dist\PerformanceMonitor.exe" (
-    echo Executable file: dist\PerformanceMonitor.exe
+if exist "dist\PerformanceMonitor\PerformanceMonitor.exe" (
+    echo Executable file: dist\PerformanceMonitor\PerformanceMonitor.exe
     echo.
-    echo File size:
-    dir "dist\PerformanceMonitor.exe" | find "PerformanceMonitor.exe"
+    echo Folder contents:
+    dir "dist\PerformanceMonitor"
     echo.
     echo Ready for distribution!
     echo.
     echo Usage:
-    echo 1. Run PerformanceMonitor.exe
-    echo 2. Click "Yes" on UAC prompt
-    echo 3. Service will be automatically installed and started
-    echo 4. Access data at http://127.0.0.1:5000/performance
+    echo 1. Open dist\PerformanceMonitor
+    echo 2. Run PerformanceMonitor.exe
+    echo 3. Click "Yes" on UAC prompt when installation starts
+    echo 4. Service will be automatically installed and started
+    echo 5. Access data at http://127.0.0.1:5000/performance
+    echo.
+    echo Recommended for distribution:
+    echo - Zip the whole dist\PerformanceMonitor folder
+    echo - Do not re-pack it into a self-extracting EXE
     echo.
 ) else (
-    echo Executable file not found. Build may have failed.
+    echo Executable folder not found. Build may have failed.
 )
 
 echo Cleaning up...

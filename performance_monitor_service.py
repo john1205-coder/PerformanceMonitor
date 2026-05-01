@@ -11,31 +11,29 @@ import time
 import threading
 import logging
 import traceback
+import subprocess
+import shutil
 from pathlib import Path
 import ctypes
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import win32service
 import win32serviceutil
 import win32event
 import winreg
 import servicemanager
-from flask import Flask, jsonify
-from flask_cors import CORS
 import psutil
-
-# Optionally import GPUtil
-try:
-    import GPUtil
-    GPU_AVAILABLE = True
-except ImportError:
-    GPU_AVAILABLE = False
 
 # Define data directory in ProgramData
 PROGRAM_DATA_DIR = Path(os.environ.get("ProgramData", "C:\\ProgramData")) / "PerformanceMonitor"
+SERVICE_RUN_ARGUMENT = "--run-service"
+NVIDIA_SMI_PATH = shutil.which("nvidia-smi")
+GPU_AVAILABLE = NVIDIA_SMI_PATH is not None
+DELETE_ACCESS = 0x00010000
 
 # Logging configuration
 LOG_DIR = Path(os.path.expandvars(r'%PROGRAMDATA%\PerformanceMonitor'))
-LOG_DIR.mkdir(exist_ok=True)
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOG_DIR / 'performance_monitor.log'
 
 logger = logging.getLogger('PerformanceMonitor')
@@ -60,8 +58,8 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
     def __init__(self, args):
         win32serviceutil.ServiceFramework.__init__(self, args)
         self.hWaitStop = win32event.CreateEvent(None, 0, 0, None)
-        self.app = None
-        self.flask_thread = None
+        self.http_server = None
+        self.server_thread = None
         self.monitor_thread = None
         self.running = False
         self.performance_data = {}
@@ -106,18 +104,43 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
             return port, collect, user_sid
         except Exception as e:
             logger.warning(f"Error loading config: {e}")
-            return 5000, {"psutil": True, "hwinfo": True}
+            return 5000, {"psutil": True, "hwinfo": True}, None
 
-    def get_gpu_temperature(self):
-        """Get GPU temperature"""
+    def get_gpu_stats(self):
+        """Get GPU usage, VRAM usage, and temperature via nvidia-smi."""
+        if not NVIDIA_SMI_PATH:
+            return None
+
         try:
-            if GPU_AVAILABLE:
-                gpus = GPUtil.getGPUs()
-                if gpus and gpus[0].temperature is not None:
-                    return round(gpus[0].temperature, 1)
+            command = [
+                NVIDIA_SMI_PATH,
+                "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu",
+                "--format=csv,noheader,nounits",
+            ]
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            first_line = result.stdout.strip().splitlines()[0]
+            gpu_util, memory_used, memory_total, temperature = [
+                part.strip() for part in first_line.split(",")
+            ]
+            memory_used = float(memory_used)
+            memory_total = float(memory_total)
+            return {
+                "gpu_usage": round(float(gpu_util), 1),
+                "vram_usage": round((memory_used / memory_total) * 100, 1) if memory_total else 0.0,
+                "vram_used_gb": round(memory_used / 1024, 1),
+                "vram_total_gb": round(memory_total / 1024, 1),
+                "gpu_temp": round(float(temperature), 1),
+            }
         except Exception as e:
-            logger.debug(f"GPU temperature unavailable: {e}")
-        
+            logger.debug(f"GPU data unavailable: {e}")
+
         return None
 
     def SvcStop(self):
@@ -126,9 +149,13 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
         win32event.SetEvent(self.hWaitStop)
         self.running = False
         
-        if self.flask_thread and self.flask_thread.is_alive():
-            logger.info("Stopping Flask application...")
-            # Note: Graceful shutdown of Flask is complex; relies on process exit
+        if self.http_server:
+            logger.info("Stopping local HTTP server...")
+            try:
+                self.http_server.shutdown()
+                self.http_server.server_close()
+            except Exception as e:
+                logger.warning(f"HTTP server shutdown warning: {e}")
         
         logger.info("Service stopped")
 
@@ -152,39 +179,75 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
                 (self._svc_name_, str(e))
             )
 
-    def create_flask_app(self):
-        """Create Flask application"""
-        app = Flask(__name__)
-        CORS(app, origins="*")
-        
-        app.logger.setLevel(logging.WARNING)
-        logging.getLogger('werkzeug').setLevel(logging.WARNING)
-        
-        @app.route('/performance', methods=['GET'])
-        def get_performance():
-            try:
-                if self.data_file.exists():
-                    with open(self.data_file, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                else:
-                    data = self.get_default_data()
-                return jsonify(data)
-            except Exception as e:
-                logger.error(f"Error serving performance data: {e}")
-                return jsonify({'error': str(e)}), 500
-        
-        @app.route('/status', methods=['GET'])
-        def get_status():
-            """Return service status"""
-            return jsonify({
-                'status': 'running',
-                'service': self._svc_display_name_,
-                'port': self.port,
-                'gpu_available': GPU_AVAILABLE,
-                'timestamp': time.time()
-            })
-        
-        return app
+    def create_http_handler(self):
+        """Create a lightweight local-only HTTP handler."""
+        service = self
+
+        class PerformanceMonitorHandler(BaseHTTPRequestHandler):
+            server_version = "PerformanceMonitor/1.0"
+            sys_version = ""
+
+            def log_message(self, format, *args):
+                logger.debug("HTTP %s - %s", self.address_string(), format % args)
+
+            def _send_json(self, payload, status_code=200):
+                body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+                self.send_response(status_code)
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.send_header('Content-Length', str(len(body)))
+                self.send_header('Cache-Control', 'no-store')
+
+                origin = self.headers.get('Origin')
+                if origin in (None, "null"):
+                    self.send_header('Access-Control-Allow-Origin', 'null' if origin == "null" else '*')
+                elif origin.startswith('http://127.0.0.1') or origin.startswith('http://localhost'):
+                    self.send_header('Access-Control-Allow-Origin', origin)
+                    self.send_header('Vary', 'Origin')
+
+                self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
+                self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_OPTIONS(self):
+                self.send_response(204)
+                self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
+                self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+                origin = self.headers.get('Origin')
+                if origin in (None, "null"):
+                    self.send_header('Access-Control-Allow-Origin', 'null' if origin == "null" else '*')
+                elif origin.startswith('http://127.0.0.1') or origin.startswith('http://localhost'):
+                    self.send_header('Access-Control-Allow-Origin', origin)
+                    self.send_header('Vary', 'Origin')
+                self.end_headers()
+
+            def do_GET(self):
+                try:
+                    if self.path == '/performance':
+                        if service.data_file.exists():
+                            with open(service.data_file, 'r', encoding='utf-8') as f:
+                                payload = json.load(f)
+                        else:
+                            payload = service.get_default_data()
+                        self._send_json(payload)
+                        return
+
+                    if self.path == '/status':
+                        self._send_json({
+                            'status': 'running',
+                            'service': service._svc_display_name_,
+                            'port': service.port,
+                            'gpu_available': GPU_AVAILABLE,
+                            'timestamp': time.time()
+                        })
+                        return
+
+                    self._send_json({'error': 'Not found'}, 404)
+                except Exception as e:
+                    logger.error(f"Error serving request {self.path}: {e}")
+                    self._send_json({'error': str(e)}, 500)
+
+        return PerformanceMonitorHandler
 
     def get_default_data(self):
         """Return default performance data"""
@@ -258,7 +321,7 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
                 fr"{self.user_sid}\{hwinfo_reg_path}"
             )
             if sensors:
-                logger.debug(f"HWiNFO sensors loaded from HKEY_USERS\{self.user_sid}")
+                logger.debug(f"HWiNFO sensors loaded from HKEY_USERS\\{self.user_sid}")
                 return sensors
             else:
                 logger.warning(f"No HWiNFO sensors found for SID: {self.user_sid}, falling back to HKEY_LOCAL_MACHINE")
@@ -282,23 +345,17 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
 
             # ===== psutil backend =====
             if is_psutil_enabled:
-                # --- GPU (GPUtil) ---
+                # --- GPU (nvidia-smi) ---
                 gpu_usage, vram_usage = 0, 0
                 vram_used_gb, vram_total_gb = None, None
-
-                if GPU_AVAILABLE:
-                    try:
-                        gpus = GPUtil.getGPUs()
-                        if gpus:
-                            gpu = gpus[0]
-                            gpu_usage = round(gpu.load * 100, 1)
-                            vram_usage = round(gpu.memoryUsed / gpu.memoryTotal * 100, 1)
-                            vram_used_gb = round(gpu.memoryUsed / 1024, 1)
-                            vram_total_gb = round(gpu.memoryTotal / 1024, 1)
-                    except Exception as e:
-                        logger.debug(f"GPU data unavailable: {e}")
-
-                gpu_temp = self.get_gpu_temperature()
+                gpu_temp = None
+                gpu_stats = self.get_gpu_stats()
+                if gpu_stats:
+                    gpu_usage = gpu_stats["gpu_usage"]
+                    vram_usage = gpu_stats["vram_usage"]
+                    vram_used_gb = gpu_stats["vram_used_gb"]
+                    vram_total_gb = gpu_stats["vram_total_gb"]
+                    gpu_temp = gpu_stats["gpu_temp"]
 
                 # --- Memory ---
                 mem = psutil.virtual_memory()
@@ -427,32 +484,30 @@ class PerformanceMonitorService(win32serviceutil.ServiceFramework):
         logger.info("Performance monitoring stopped")
 
 
-    def run_flask(self):
-        """Run Flask server"""
+    def run_http_server(self):
+        """Run the local HTTP server."""
         try:
-            logger.info(f"Starting Flask server on http://127.0.0.1:{self.port}")
-            self.app.run(
-                host='127.0.0.1', 
-                port=self.port, 
-                debug=False,
-                use_reloader=False,
-                threaded=True
-            )
+            handler = self.create_http_handler()
+            self.http_server = ThreadingHTTPServer(('127.0.0.1', self.port), handler)
+            self.http_server.daemon_threads = True
+            logger.info(f"Starting local HTTP server on http://127.0.0.1:{self.port}")
+            self.http_server.serve_forever(poll_interval=0.5)
         except Exception as e:
-            logger.error(f"Flask server error: {e}")
+            logger.error(f"HTTP server error: {e}")
             logger.error(traceback.format_exc())
+        finally:
+            self.http_server = None
 
     def main(self):
         """Main processing"""
         try:
-            self.app = self.create_flask_app()
             self.monitor_thread = threading.Thread(target=self.update_performance_loop, daemon=True)
             self.monitor_thread.start()
             logger.info("Performance monitoring thread started")
             
-            self.flask_thread = threading.Thread(target=self.run_flask, daemon=True)
-            self.flask_thread.start()
-            logger.info("Flask server thread started")
+            self.server_thread = threading.Thread(target=self.run_http_server, daemon=True)
+            self.server_thread.start()
+            logger.info("HTTP server thread started")
             
             logger.info("Performance Monitor Service is running")
             win32event.WaitForSingleObject(self.hWaitStop, win32event.INFINITE)
@@ -476,19 +531,19 @@ def request_admin_rights():
         return True
     
     try:
-        ctypes.windll.shell32.ShellExecuteW(
+        parameters = subprocess.list2cmdline(sys.argv[1:])
+        result = ctypes.windll.shell32.ShellExecuteW(
             None, 
             "runas", 
             sys.executable, 
-            " ".join(sys.argv), 
+            parameters,
             None, 
             1
         )
+        return result > 32
     except Exception as e:
         logger.error(f"Failed to request admin rights: {e}")
         return False
-    
-    return False
 
 def install_service():
     """Install the Windows service"""
@@ -528,14 +583,18 @@ def install_service():
         except Exception as e:
             logger.debug(f"No existing service to remove or removal failed: {e}")
 
-        hscm = win32service.OpenSCManager(None, None, win32service.SC_MANAGER_ALL_ACCESS)
+        hscm = win32service.OpenSCManager(
+            None,
+            None,
+            win32service.SC_MANAGER_CONNECT | win32service.SC_MANAGER_CREATE_SERVICE
+        )
         try:
-            service_cmd = f'"{exe_path}" debug'
+            service_cmd = subprocess.list2cmdline([exe_path, SERVICE_RUN_ARGUMENT])
             hs = win32service.CreateService(
                 hscm,
                 svc_name,
                 PerformanceMonitorService._svc_display_name_,
-                win32service.SERVICE_ALL_ACCESS,
+                win32service.SERVICE_START | win32service.SERVICE_STOP | DELETE_ACCESS | win32service.SERVICE_QUERY_STATUS | win32service.SERVICE_CHANGE_CONFIG,
                 win32service.SERVICE_WIN32_OWN_PROCESS,
                 win32service.SERVICE_AUTO_START,
                 win32service.SERVICE_ERROR_NORMAL,
@@ -573,9 +632,13 @@ def start_service():
     """Start the service"""
     try:
         logger.info("Starting Performance Monitor Service...")
-        hscm = win32service.OpenSCManager(None, None, win32service.SC_MANAGER_ALL_ACCESS)
+        hscm = win32service.OpenSCManager(None, None, win32service.SC_MANAGER_CONNECT)
         try:
-            hs = win32service.OpenService(hscm, PerformanceMonitorService._svc_name_, win32service.SERVICE_ALL_ACCESS)
+            hs = win32service.OpenService(
+                hscm,
+                PerformanceMonitorService._svc_name_,
+                win32service.SERVICE_START | win32service.SERVICE_QUERY_STATUS
+            )
             try:
                 win32service.StartService(hs, None)
                 logger.info("Service started successfully")
@@ -685,8 +748,8 @@ def main():
                 except Exception as e:
                     print(f"Service removal error: {e}")
                 return
-            elif arg in ['debug', '--debug']:
-                logger.info("Running in debug mode")
+            elif arg in [SERVICE_RUN_ARGUMENT, 'debug', '--debug']:
+                logger.info("Running in service host mode")
                 servicemanager.Initialize()
                 servicemanager.PrepareToHostSingle(PerformanceMonitorService)
                 servicemanager.StartServiceCtrlDispatcher()

@@ -4,8 +4,8 @@
 
 ### Features
 
-- Collects system performance data every second via **psutil / GPUtil** and/or **[HWiNFO](https://www.hwinfo.com/)**, and runs a local Flask server so the data can be accessed from Wallpaper Engine web wallpapers.
-- When using **psutil / GPUtil**, the following metrics are available:
+- Collects system performance data every second via **psutil / NVIDIA SMI** and/or **[HWiNFO](https://www.hwinfo.com/)**, and runs a local HTTP server so the data can be accessed from Wallpaper Engine web wallpapers.
+- When using **psutil / NVIDIA SMI**, the following metrics are available:
   - CPU usage
   - GPU usage and temperature (NVIDIA GPUs only)
   - RAM and VRAM usage (VRAM metrics for NVIDIA GPUs only)
@@ -36,9 +36,9 @@ Only the wallpapers that I am aware of are listed here.
 
 #### Data Sources
 
-- **Default (psutil / GPUtil)**  
-  The application works out of the box using `psutil` and `GPUtil`.  
-  This provides basic system metrics such as CPU, memory, disk, network, GPU usage, and supported temperature data.
+- **Default (psutil / NVIDIA SMI)**  
+  The application works out of the box using `psutil` and `nvidia-smi` when available.  
+  This provides basic system metrics such as CPU, memory, disk, network, GPU usage, and supported temperature data on NVIDIA systems.
 
 - **Advanced (HWiNFO)**  
   For more detailed and accurate hardware sensors (temperatures, voltages, fan speeds, etc.), HWiNFO can be used.
@@ -83,7 +83,7 @@ download the uninstaller from [Latest Release](https://github.com/sheetau/Perfor
 
 ### Security & Privacy
 
-- Built using Python and Flask for a **simple, local performance monitoring environment**.
+- Built using Python and the Windows / Python standard libraries for a **simple, local performance monitoring environment**.
 - The tool runs entirely on your machine and **does not send any data over the internet** or access external servers.
 - Performance statistics are collected locally and served only on `localhost`.
 - The default endpoint (`http://127.0.0.1:5000/performance`) is only accessible from your own computer.
@@ -98,10 +98,7 @@ download the uninstaller from [Latest Release](https://github.com/sheetau/Perfor
 ### Dependencies and References
 
 - [Python 3.11+](https://www.python.org/)
-- [Flask](https://github.com/pallets/flask)
-- [Flask-CORS](https://github.com/corydolphin/flask-cors)
 - [psutil](https://github.com/giampaolo/psutil)
-- [GPUtil](https://github.com/anderskm/gputil)
 - [HWiNFO](https://www.hwinfo.com/)
 - [pywin32](https://github.com/mhammond/pywin32)
 - [PyInstaller](https://github.com/pyinstaller/pyinstaller)
@@ -121,7 +118,7 @@ download the uninstaller from [Latest Release](https://github.com/sheetau/Perfor
 
 ### Accessing Performance Data in Your Web Wallpaper
 
-The Performance Monitor exposes system metrics via a local Flask server (default: `http://127.0.0.1:5000/performance`). You can fetch these metrics in your web wallpaper using standard JavaScript `fetch`.
+The Performance Monitor exposes system metrics via a local HTTP server (default: `http://127.0.0.1:5000/performance`). You can fetch these metrics in your web wallpaper using standard JavaScript `fetch`.
 
 The data is returned in the following JSON format:
 
@@ -155,7 +152,7 @@ The data is returned in the following JSON format:
 }
 ```
 
-#### Available psutil / GPUtil Keys
+#### Available psutil / GPU Keys
 
 The following keys are available by default under the `psutil` object:
 

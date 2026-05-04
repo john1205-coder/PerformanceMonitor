@@ -29,8 +29,8 @@ Only the wallpapers that I am aware of are listed here.
 
 ### Installation & Usage
 
-1. Download the latest `PerformanceMonitor.exe` from [Latest Release](https://github.com/sheetau/PerformanceMonitor/releases/latest).
-2. Run the executable **once with administrator privileges**.
+1. Download the latest `PerformanceMonitor.zip` from [Latest Release](https://github.com/sheetau/PerformanceMonitor/releases/latest).
+2. Unzip it and run the executable inside it **once with administrator privileges**.
    > This will automatically uninstall any previous versions and register the new service to start at boot.
 3. By default, performance data is accessible at: http://127.0.0.1:5000/performance
 
@@ -79,7 +79,7 @@ Only the wallpapers that I am aware of are listed here.
 
 #### Uninstalling
 
-download the uninstaller from [Latest Release](https://github.com/sheetau/PerformanceMonitor/releases/latest), place it in the same folder as `PerformanceMonitor.exe`, and run it as Administrator (This will stop and delete Performance Monitor service, Kill any remaining `PerformanceMonitor.exe` processes, and Delete `PerformanceMonitor.exe` and `%ProgramData%\PerformanceMonitor`).
+Run uninstaller.bat as Administrator (This will stop and delete Performance Monitor service, Kill any remaining `PerformanceMonitor.exe` processes, and Delete `PerformanceMonitor.exe`, `_internal` and `%ProgramData%\PerformanceMonitor`).
 
 ### Security & Privacy
 
@@ -89,11 +89,10 @@ download the uninstaller from [Latest Release](https://github.com/sheetau/Perfor
 - The default endpoint (`http://127.0.0.1:5000/performance`) is only accessible from your own computer.
 - Fully open-source, allowing you to inspect and verify the code at any time.
 
-> **Note on Security Warnings:** This executable is not code-signed, and it accesses specific registry paths to retrieve HWiNFO sensor data. Because of these factors, some antivirus software may flag it as suspicious. Currently, we have confirmed detections such as Bkav Pro (W64.AIDetectMalware) and SecureAge (Malicious). These are false positives; all other major security vendors recognize the software as clean. If you see a warning, click “More info” and then “Run anyway” to proceed with the installation.
->
-> **Technical Architecture:** Because this tool runs as a standard Windows service using legitimate Service APIs, it operates in Session 0. This architecture is necessary for proper system integration and automatic startup, but it can unfortunately cause some user-level diagnostic tools (like Process Explorer or PowerShell's Get-Process) to fail in retrieving standard process metadata (e.g., Path, Company). This behavior is an inherent side effect of the service architecture, not a result of intentional anti-analysis or obfuscation techniques.
->
-> It is safe to run. If you are concerned, you can review the source code in the GitHub repository or uninstall using `uninstaller.bat`. Please understand this is a personal, free project.
+> Note on Security Warnings:  
+> This executable is not code-signed, so some antivirus software may flag it as suspicious.  
+> Additionally, because this tool runs as a standard Windows service using legitimate Service APIs, it operates in Session 0. This architecture is necessary for proper system integration and automatic startup, but it can unfortunately cause some user-level diagnostic tools (like Process Explorer or PowerShell's Get-Process) to fail in retrieving standard process metadata (e.g., Path, Company). This behavior is an inherent side effect of the service architecture, not a result of intentional anti-analysis or obfuscation techniques.  
+> It is safe to run. If you are concerned, you can review the source code in the GitHub repository or uninstall using the steps below. Please understand this is a personal, free project.
 
 ### Dependencies and References
 
